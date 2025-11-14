@@ -1,0 +1,5 @@
+1. Convert python program to exe
+
+pyinstaller --noconsole --onefile --icon=logo.ico "it_connect.py"
+
+2. using inno setup complier run "create installer.iss" to create instable executable
