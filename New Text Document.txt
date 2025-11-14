@@ -1,0 +1,44 @@
+; Inno Setup Script for IM Quick Help
+; Silent Always-On-Startup Version
+
+#define MyAppName "IM Quick Help"
+#define MyAppVersion "1.0"
+#define MyAppPublisher "Service Desk DevOps"
+#define MyAppURL "https://imservicedesk.debswana.bw"
+#define MyAppExeName "IM_Quick_Help.exe"
+
+[Setup]
+AppId={{IMQuickHelp-1234-5678-90AB-CDEF12345678}}
+AppName={#MyAppName}
+AppVersion={#MyAppVersion}
+AppPublisher={#MyAppPublisher}
+AppPublisherURL={#MyAppURL}
+AppSupportURL={#MyAppURL}
+AppUpdatesURL={#MyAppURL}
+DefaultDirName={autopf}\{#MyAppPublisher}\{#MyAppName}
+DisableProgramGroupPage=yes
+PrivilegesRequired=lowest
+OutputDir=Output
+OutputBaseFilename=IM_Quick_Help_Setup
+SetupIconFile=logo.ico
+Compression=lzma
+SolidCompression=yes
+WizardStyle=modern
+
+[Languages]
+Name: "english"; MessagesFile: "compiler:Default.isl"
+
+[Tasks]
+Name: "desktopicon"; Description: "Create a &desktop icon"; GroupDescription: "Additional icons:"; Flags: unchecked
+
+[Files]
+Source: "dist\{#MyAppExeName}"; DestDir: "{app}"; Flags: ignoreversion
+Source: "logo.ico"; DestDir: "{app}"; Flags: ignoreversion
+
+[Icons]
+Name: "{autoprograms}\{#MyAppName}"; Filename: "{app}\{#MyAppExeName}"; IconFilename: "{app}\logo.ico"
+Name: "{autodesktop}\{#MyAppName}"; Filename: "{app}\{#MyAppExeName}"; IconFilename: "{app}\logo.ico"; Tasks: desktopicon
+Name: "{commonstartup}\{#MyAppName}"; Filename: "{app}\{#MyAppExeName}"; IconFilename: "{app}\logo.ico"
+
+[Run]
+Filename: "{app}\{#MyAppExeName}"; Description: "Launch IM Quick Help"; Flags: nowait postinstall skipifsilent
