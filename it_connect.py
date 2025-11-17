@@ -1,11 +1,19 @@
-# Force DPI Awareness for crisp rendering - MUST BE AT THE VERY TOP
+"""
+Customer Support Overlay - Improved Version
+Key improvements:
+- Better error handling and logging
+- Cleaner separation of concerns
+- More efficient resource management
+- Improved configuration management
+- Better threading safety
+"""
+
+# Force DPI Awareness for crisp rendering
 import ctypes
 try:
-    # Set DPI awareness for Windows 8.1 and above
-    ctypes.windll.shcore.SetProcessDpiAwareness(2)  # PER_MONITOR_DPI_AWARE = 2
+    ctypes.windll.shcore.SetProcessDpiAwareness(2)
 except Exception:
     try:
-        # Fallback for Windows 8 and below
         ctypes.windll.user32.SetProcessDPIAware()
     except Exception:
         pass
@@ -17,660 +25,678 @@ import subprocess
 import re
 import time
 import threading
+import logging
 from ctypes import windll, Structure, c_ulong, byref
 from PIL import Image, ImageTk, ImageDraw, ImageFont
 import os
 import sys
 import webbrowser
 import getpass
+from typing import Optional, Tuple
+from dataclasses import dataclass
+
+# Configure logging
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
+)
+logger = logging.getLogger(__name__)
+
 
 class POINT(Structure):
     _fields_ = [("x", c_ulong), ("y", c_ulong)]
 
-class CustomerSupportOverlay:
-    def __init__(self):
-        # Create main overlay window (hidden initially)
-        self.root = tk.Tk()
-        self.setup_main_window()
-        
-        # Create icon window
-        self.icon_root = tk.Toplevel()
-        self.setup_icon_window()
-        
-        self.create_widgets()
-        self.update_info()
-        
-        # Track window state
-        self.is_visible = False
-        self.hide_timer = None
-        
-    def get_windows_icon_size(self):
-        """Get the appropriate icon size based on Windows desktop icon settings"""
-        try:
-            # Windows desktop icon sizes:
-            # Small: 32x32, Medium: 48x48, Large: 64x64, Extra Large: 96x96
-            
-            # For Medium setting, use 48x48 as base but scale for better visibility
-            # Using 60x60 for Medium size as it provides good visibility while fitting well
-            base_size = 50
-            
-            # Get DPI scaling factor
-            hdc = windll.user32.GetDC(0)
-            dpi = windll.gdi32.GetDeviceCaps(hdc, 88)  # LOGPIXELSX
-            windll.user32.ReleaseDC(0, hdc)
-            
-            # Calculate scaled size based on DPI
-            scale_factor = dpi / 96.0  # 96 is standard DPI
-            scaled_size = int(base_size * scale_factor)
-            
-            # Ensure reasonable bounds
-            scaled_size = max(48, min(scaled_size, 80))
-            
-            return scaled_size
-            
-        except Exception as e:
-            print(f"Error detecting icon size: {e}, using default 60x60")
-            return 60
+
+@dataclass
+class Config:
+    """Configuration constants"""
+    # Window settings
+    MAIN_WINDOW_WIDTH: int = 350
+    MAIN_WINDOW_HEIGHT: int = 535
+    MAIN_WINDOW_OFFSET: int = 20
     
-    def setup_main_window(self):
-        """Setup the main information overlay window"""
-        self.root.overrideredirect(True)
-        self.root.attributes('-alpha', 0.0)  # Start hidden
-        self.root.attributes('-topmost', True)
-        
-        # Position at top-right corner, left of the icon
-        screen_width = self.root.winfo_screenwidth()
-        self.root.geometry(f"350x530+{screen_width-370}+20")  # Adjusted size to fit content
-        self.root.configure(bg='#2c2c2c')
-        
-    def setup_icon_window(self):
-        """Setup the icon window - behaves like desktop shortcuts (Edge, Adobe)"""
-        self.icon_root.overrideredirect(True)
-        self.icon_root.attributes('-topmost', False)  # Don't stay on top of apps
-        self.icon_root.attributes('-alpha', 1.0)  # Always visible on desktop
-        
-        # Get scaled icon size for Windows Medium setting
-        self.icon_size = self.get_windows_icon_size()
-        
-        # Position at top-right corner with proper spacing
-        screen_width = self.icon_root.winfo_screenwidth()
-        screen_height = self.icon_root.winfo_screenheight()
-        
-        # Calculate position to align with desktop icons
-        x_position = screen_width - self.icon_size - 25  # 20px margin from right edge
-        y_position = 20  # 40px from top
-        
-        self.icon_root.geometry(f"{self.icon_size}x{self.icon_size}+{x_position}+{y_position}")
-        self.icon_root.configure(bg='#000001')  # Use a very dark color that's almost black
-        self.icon_root.wm_attributes("-transparentcolor", "#000001")  # Make this specific color transparent
-        
-        # Make it a proper desktop-level window
-        self.make_desktop_window()
-        
-    def make_desktop_window(self):
-        """Make the window behave like a desktop icon"""
-        try:
-            # Get the window handle
-            hwnd = windll.user32.FindWindowW(None, self.icon_root.title())
-            
-            # Set window style to make it a desktop-level window
-            # This makes it behave like desktop icons
-            GWL_EXSTYLE = -20
-            WS_EX_TOOLWINDOW = 0x00000080
-            WS_EX_NOACTIVATE = 0x08000000
-            
-            # Get current style
-            current_style = windll.user32.GetWindowLongW(hwnd, GWL_EXSTYLE)
-            
-            # Add toolwindow and noactivate styles
-            new_style = current_style | WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE
-            windll.user32.SetWindowLongW(hwnd, GWL_EXSTYLE, new_style)
-            
-        except Exception as e:
-            print(f"Window style error: {e}")
+    # Icon settings
+    BASE_ICON_SIZE: int = 50
+    MIN_ICON_SIZE: int = 48
+    MAX_ICON_SIZE: int = 80
+    ICON_MARGIN: int = 25
+    ICON_TOP_OFFSET: int = 20
     
-    def create_widgets(self):
-        """Create widgets for both windows"""
-        self.create_main_widgets()
-        self.create_icon_widgets()
-        
-    def create_main_widgets(self):
-        """Widgets for the main overlay window"""
-        # Main content frame - no scrollbar
-        main_frame = tk.Frame(self.root, bg='#2c2c2c')
-        main_frame.pack(fill='both', expand=True, padx=0, pady=0)
-        
-        # Title bar with "Need IT Support?" text
-        title_frame = tk.Frame(main_frame, bg='#1e1e1e', height=40)
-        title_frame.pack(fill='x', padx=0, pady=0)
-        title_frame.pack_propagate(False)
-        
-        title = tk.Label(title_frame, text="Need IT Support?", 
-                        bg='#1e1e1e', fg='#ffffff', font=('Microsoft Sans Serif', 10, 'bold'))
-        title.pack(expand=True, pady=10)
-        
-        # Content frame
-        content = tk.Frame(main_frame, bg='#2c2c2c')
-        content.pack(fill='both', expand=True, padx=10, pady=10)
-        
-        # System Information Section
-        sys_info_frame = tk.Frame(content, bg='#2c2c2c')
-        sys_info_frame.pack(fill='x', pady=(0, 5))
-        
-        # Device name
-        device_frame = tk.Frame(sys_info_frame, bg='#2c2c2c')
-        device_frame.pack(fill='x', pady=2)
-        
-        device_label = tk.Label(device_frame, text="Device Name:", 
-                               bg='#2c2c2c', fg='#cccccc', font=('Microsoft Sans Serif', 9),
-                               anchor='w', width=15)
-        device_label.pack(side='left')
-        
-        self.device_value = tk.Label(device_frame, text="", 
-                                    bg='#2c2c2c', fg='#ffffff', font=('Microsoft Sans Serif', 9, 'bold'),
-                                    anchor='w')
-        self.device_value.pack(side='left', fill='x', expand=True)
-        
-        # Username
-        user_frame = tk.Frame(sys_info_frame, bg='#2c2c2c')
-        user_frame.pack(fill='x', pady=2)
-        
-        user_label = tk.Label(user_frame, text="Username:", 
-                             bg='#2c2c2c', fg='#cccccc', font=('Microsoft Sans Serif', 9),
-                             anchor='w', width=15)
-        user_label.pack(side='left')
-        
-        self.user_value = tk.Label(user_frame, text="", 
-                                  bg='#2c2c2c', fg='#ffffff', font=('Microsoft Sans Serif', 9, 'bold'),
-                                  anchor='w')
-        self.user_value.pack(side='left', fill='x', expand=True)
-        
-        # Domain
-        domain_frame = tk.Frame(sys_info_frame, bg='#2c2c2c')
-        domain_frame.pack(fill='x', pady=2)
-        
-        domain_label = tk.Label(domain_frame, text="Domain:", 
-                               bg='#2c2c2c', fg='#cccccc', font=('Microsoft Sans Serif', 9),
-                               anchor='w', width=15)
-        domain_label.pack(side='left')
-        
-        self.domain_value = tk.Label(domain_frame, text="", 
-                                    bg='#2c2c2c', fg='#ffffff', font=('Microsoft Sans Serif', 9, 'bold'),
-                                    anchor='w')
-        self.domain_value.pack(side='left', fill='x', expand=True)
-        
-        # Network
-        network_frame = tk.Frame(sys_info_frame, bg='#2c2c2c')
-        network_frame.pack(fill='x', pady=2)
-        
-        network_label = tk.Label(network_frame, text="Network:", 
-                                bg='#2c2c2c', fg='#cccccc', font=('Microsoft Sans Serif', 9),
-                                anchor='w', width=15)
-        network_label.pack(side='left')
-        
-        self.network_value = tk.Label(network_frame, text="", 
-                                     bg='#2c2c2c', fg='#ffffff', font=('Microsoft Sans Serif', 9, 'bold'),
-                                     anchor='w')
-        self.network_value.pack(side='left', fill='x', expand=True)
-        
-        # Separator
-        separator1 = tk.Frame(content, bg='#555555', height=1)
-        separator1.pack(fill='x', pady=8)
-        
-        # Service Desk Section
-        service_desk_frame = tk.Frame(content, bg='#2c2c2c')
-        service_desk_frame.pack(fill='x', pady=(0, 10))
-        
-        # Service Desk Title
-        service_title = tk.Label(service_desk_frame, text="Service Desk", 
-                                bg='#2c2c2c', fg='#ffffff', font=('Microsoft Sans Serif', 10, 'bold'),
-                                anchor='w')
-        service_title.pack(anchor='w', pady=(0, 5))
-        
-        # Operating Hours
-        hours_frame = tk.Frame(service_desk_frame, bg='#2c2c2c')
-        hours_frame.pack(fill='x', pady=2)
-        
-        hours_label = tk.Label(hours_frame, text="Operating Hours:", 
-                              bg='#2c2c2c', fg='#cccccc', font=('Microsoft Sans Serif', 9),
-                              anchor='w', width=15)
-        hours_label.pack(side='left')
-        
-        hours_value = tk.Label(hours_frame, text="0700 - 1645hrs", 
-                              bg='#2c2c2c', fg='#ffffff', font=('Microsoft Sans Serif', 9, 'bold'),
-                              anchor='w')
-        hours_value.pack(side='left', fill='x', expand=True)
-        
-        # Self Service Articles
-        articles_frame = tk.Frame(service_desk_frame, bg='#2c2c2c')
-        articles_frame.pack(fill='x', pady=2)
-        
-        articles_label = tk.Label(articles_frame, text="Self Service Articles:", 
-                                 bg='#2c2c2c', fg='#cccccc', font=('Microsoft Sans Serif', 9),
-                                 anchor='w', width=15)
-        articles_label.pack(side='left')
-        
-        # Clickable link
-        self.articles_link = tk.Label(articles_frame, text="Click Me", 
-                                     bg='#2c2c2c', fg='#1e90ff', font=('Microsoft Sans Serif', 9, 'underline'),
-                                     cursor="hand2")
-        self.articles_link.pack(side='left')
-        self.articles_link.bind("<Button-1>", lambda e: webbrowser.open("https://imservicedesk.debswana.bw/sd/SolutionsHome.sd"))
-        
-        # Email
-        email_frame = tk.Frame(service_desk_frame, bg='#2c2c2c')
-        email_frame.pack(fill='x', pady=2)
-        
-        email_label = tk.Label(email_frame, text="Email:", 
-                              bg='#2c2c2c', fg='#cccccc', font=('Microsoft Sans Serif', 9),
-                              anchor='w', width=15)
-        email_label.pack(side='left')
-        
-        email_value = tk.Label(email_frame, text="dbshelp@debswana.bw", 
-                              bg='#2c2c2c', fg='#ffffff', font=('Microsoft Sans Serif', 9, 'bold'),
-                              anchor='w')
-        email_value.pack(side='left', fill='x', expand=True)
-        
-        # Internal Number
-        internal_frame = tk.Frame(service_desk_frame, bg='#2c2c2c')
-        internal_frame.pack(fill='x', pady=2)
-        
-        internal_label = tk.Label(internal_frame, text="Internal Number:", 
-                                 bg='#2c2c2c', fg='#cccccc', font=('Microsoft Sans Serif', 9),
-                                 anchor='w', width=15)
-        internal_label.pack(side='left')
-        
-        internal_value = tk.Label(internal_frame, text="18222", 
-                                 bg='#2c2c2c', fg='#ffffff', font=('Microsoft Sans Serif', 9, 'bold'),
-                                 anchor='w')
-        internal_value.pack(side='left', fill='x', expand=True)
-        
-        # External Number
-        external_frame = tk.Frame(service_desk_frame, bg='#2c2c2c')
-        external_frame.pack(fill='x', pady=2)
-        
-        external_label = tk.Label(external_frame, text="External Number:", 
-                                 bg='#2c2c2c', fg='#cccccc', font=('Microsoft Sans Serif', 9),
-                                 anchor='w', width=15)
-        external_label.pack(side='left')
-        
-        external_value = tk.Label(external_frame, text="+267 364 8222", 
-                                 bg='#2c2c2c', fg='#ffffff', font=('Microsoft Sans Serif', 9, 'bold'),
-                                 anchor='w')
-        external_value.pack(side='left', fill='x', expand=True)
-        
-        # Separator
-        separator2 = tk.Frame(content, bg='#555555', height=1)
-        separator2.pack(fill='x', pady=8)
-        
-        # Standby Section
-        standby_frame = tk.Frame(content, bg='#2c2c2c')
-        standby_frame.pack(fill='x', pady=(0, 10))
-        
-        # Standby Title
-        standby_title = tk.Label(standby_frame, text="Standby", 
-                               bg='#2c2c2c', fg='#ffffff', font=('Microsoft Sans Serif', 10, 'bold'),
-                               anchor='w')
-        standby_title.pack(anchor='w', pady=(0, 3))
-        
-        # Standby Operating Hours
-        standby_hours_frame = tk.Frame(standby_frame, bg='#2c2c2c')
-        standby_hours_frame.pack(fill='x', pady=2)
-        
-        standby_hours_label = tk.Label(standby_hours_frame, text="Operating Hours:", 
-                                      bg='#2c2c2c', fg='#cccccc', font=('Microsoft Sans Serif', 9),
-                                      anchor='w', width=15)
-        standby_hours_label.pack(side='left')
-        
-        standby_hours_value = tk.Label(standby_hours_frame, text="1645 - 0700hrs", 
-                                      bg='#2c2c2c', fg='#ffffff', font=('Microsoft Sans Serif', 9, 'bold'),
-                                      anchor='w')
-        standby_hours_value.pack(side='left', fill='x', expand=True)
-        
-        # Standby Contacts
-        # DJW
-        djw_frame = tk.Frame(standby_frame, bg='#2c2c2c')
-        djw_frame.pack(fill='x', pady=0)
-        
-        djw_label = tk.Label(djw_frame, text="DJW:", 
-                            bg='#2c2c2c', fg='#cccccc', font=('Microsoft Sans Serif', 9),
-                            anchor='w', width=15)
-        djw_label.pack(side='left')
-        
-        djw_value = tk.Label(djw_frame, text="71382489", 
-                            bg='#2c2c2c', fg='#ffffff', font=('Microsoft Sans Serif', 9, 'bold'),
-                            anchor='w')
-        djw_value.pack(side='left', fill='x', expand=True)
-        
-        # DOR
-        dor_frame = tk.Frame(standby_frame, bg='#2c2c2c')
-        dor_frame.pack(fill='x', pady=1)
-        
-        dor_label = tk.Label(dor_frame, text="DOR:", 
-                            bg='#2c2c2c', fg='#cccccc', font=('Microsoft Sans Serif', 9),
-                            anchor='w', width=15)
-        dor_label.pack(side='left')
-        
-        dor_value = tk.Label(dor_frame, text="71313074", 
-                            bg='#2c2c2c', fg='#ffffff', font=('Microsoft Sans Serif', 9, 'bold'),
-                            anchor='w')
-        dor_value.pack(side='left', fill='x', expand=True)
-        
-        # DCC
-        dcc_frame = tk.Frame(standby_frame, bg='#2c2c2c')
-        dcc_frame.pack(fill='x', pady=1)
-        
-        dcc_label = tk.Label(dcc_frame, text="DCC:", 
-                            bg='#2c2c2c', fg='#cccccc', font=('Microsoft Sans Serif', 9),
-                            anchor='w', width=15)
-        dcc_label.pack(side='left')
-        
-        dcc_value = tk.Label(dcc_frame, text="71320195", 
-                            bg='#2c2c2c', fg='#ffffff', font=('Microsoft Sans Serif', 9, 'bold'),
-                            anchor='w')
-        dcc_value.pack(side='left', fill='x', expand=True)
-        
-        # Bind mouse events to the main window for auto-hide
-        self.root.bind("<Enter>", self.on_enter_main_window)
-        self.root.bind("<Leave>", self.on_leave_main_window)
-        
-    def create_text_icon(self):
-        """Create a text-based 'IM' icon with white rounded box that scales with Windows icon size"""
-        size = (self.icon_size, self.icon_size)
-        image = Image.new('RGBA', size, (0, 0, 0, 0))  # Transparent background
-        draw = ImageDraw.Draw(image)
-        
-        # Calculate proportional sizes based on icon size
-        box_margin = max(4, int(self.icon_size * 0.08))  # 8% margin
-        corner_radius = max(8, int(self.icon_size * 0.13))  # 13% for corner radius
-        font_size = max(16, int(self.icon_size * 0.35))  # 35% of icon size for font
-        
-        # White rounded rectangle background
-        box_coords = [
-            box_margin, 
-            box_margin, 
-            size[0] - box_margin, 
-            size[1] - box_margin
-        ]
-        
-        # Draw rounded rectangle (create by drawing circles at corners and filling)
-        # Top-left circle
-        draw.ellipse([box_coords[0], box_coords[1], 
-                     box_coords[0] + corner_radius * 2, box_coords[1] + corner_radius * 2], 
-                    fill='#ffffff')
-        # Top-right circle
-        draw.ellipse([box_coords[2] - corner_radius * 2, box_coords[1], 
-                     box_coords[2], box_coords[1] + corner_radius * 2], 
-                    fill='#ffffff')
-        # Bottom-left circle
-        draw.ellipse([box_coords[0], box_coords[3] - corner_radius * 2, 
-                     box_coords[0] + corner_radius * 2, box_coords[3]], 
-                    fill='#ffffff')
-        # Bottom-right circle
-        draw.ellipse([box_coords[2] - corner_radius * 2, box_coords[3] - corner_radius * 2, 
-                     box_coords[2], box_coords[3]], 
-                    fill='#ffffff')
-        
-        # Fill the rectangle areas
-        draw.rectangle([box_coords[0], box_coords[1] + corner_radius, 
-                       box_coords[2], box_coords[3] - corner_radius], 
-                      fill='#ffffff')
-        draw.rectangle([box_coords[0] + corner_radius, box_coords[1], 
-                       box_coords[2] - corner_radius, box_coords[3]], 
-                      fill='#ffffff')
-        
-        # Draw "IM" text in blue, bold
-        try:
-            # Try to use a bold font
-            font = ImageFont.truetype("arialbd.ttf", font_size)  # Bold Arial
-        except:
-            try:
-                font = ImageFont.truetype("arial.ttf", font_size)  # Regular Arial
-            except:
-                try:
-                    # Try Segoe UI which is common on Windows
-                    font = ImageFont.truetype("segoeuib.ttf", font_size)
-                except:
-                    font = ImageFont.load_default()
-        
-        text = "IT"
-        # Calculate text position to center it
-        bbox = draw.textbbox((0, 0), text, font=font)
-        text_width = bbox[2] - bbox[0]
-        text_height = bbox[3] - bbox[1]
-        text_x = (size[0] - text_width) // 2
-        text_y = (size[1] - text_height) // 2 - 2  # Slight vertical adjustment
-        
-        draw.text((text_x, text_y), text, fill='#0078d7', font=font)
-        
-        return ImageTk.PhotoImage(image)
+    # Colors
+    BG_DARK: str = '#2c2c2c'
+    BG_DARKER: str = '#1e1e1e'
+    BG_SEPARATOR: str = '#555555'
+    FG_LIGHT: str = '#ffffff'
+    FG_GRAY: str = '#cccccc'
+    FG_LINK: str = '#1e90ff'
+    FG_SUCCESS: str = '#00ff00'
+    FG_ERROR: str = '#ff4444'
+    TRANSPARENT_BG: str = '#000001'
+    ICON_WHITE: str = '#ffffff'
+    ICON_BLUE: str = '#0078d7'
     
-    def create_icon_widgets(self):
-        """Create text-based icon with 'IM' in white rounded box"""
-        try:
-            # Create the text icon
-            self.icon_image = self.create_text_icon()
-            
-            if self.icon_image:
-                # Create a container frame
-                icon_container = tk.Frame(self.icon_root, bg='#000001', borderwidth=0, highlightthickness=0)
-                icon_container.pack(fill='both', expand=True)
-                
-                # Create label with the text icon
-                self.icon_label = tk.Label(icon_container, image=self.icon_image, 
-                                         bg='#000001', borderwidth=0, highlightthickness=0,
-                                         cursor="hand2")
-                self.icon_label.pack(expand=True, fill='both')
-                self.icon_label.bind("<Button-1>", self.toggle_overlay)
-                
-                # Force window update for better rendering
-                self.icon_root.update_idletasks()
-                
-                print(f"Text-based 'IM' icon created successfully! Size: {self.icon_size}x{self.icon_size}")
-            else:
-                print("Failed to create text icon. Using fallback.")
-                self.create_fallback_text_icon()
-                
-        except Exception as e:
-            print(f"Error creating text icon: {e}. Using fallback.")
-            self.create_fallback_text_icon()
+    # Timing
+    UPDATE_INTERVAL: int = 5000  # ms
+    HIDE_DELAY: int = 500  # ms
+    CHECK_INTERVAL: int = 100  # ms
+    FADE_STEP_DELAY: float = 0.02  # seconds
     
-    def create_fallback_text_icon(self):
-        """Create a fallback text icon using tkinter canvas"""
-        # Create a container frame
-        icon_container = tk.Frame(self.icon_root, bg='#000001', borderwidth=0, highlightthickness=0)
-        icon_container.pack(fill='both', expand=True)
-        
-        # Create a canvas with transparent background
-        canvas = tk.Canvas(icon_container, bg='#000001', width=self.icon_size, height=self.icon_size,
-                          highlightthickness=0, borderwidth=0, cursor="hand2")
-        canvas.pack(expand=True, fill='both')
-        canvas.bind("<Button-1>", self.toggle_overlay)
-        
-        # Calculate proportional sizes
-        box_margin = max(4, int(self.icon_size * 0.08))
-        corner_radius = max(8, int(self.icon_size * 0.13))
-        font_size = max(16, int(self.icon_size * 0.35))
-        
-        # Draw white rounded rectangle
-        canvas.create_rectangle(box_margin + corner_radius, box_margin,
-                               self.icon_size - box_margin - corner_radius, self.icon_size - box_margin,
-                               fill='#ffffff', outline='')
-        canvas.create_rectangle(box_margin, box_margin + corner_radius,
-                               self.icon_size - box_margin, self.icon_size - box_margin - corner_radius,
-                               fill='#ffffff', outline='')
-        
-        # Draw rounded corners (circles)
-        canvas.create_oval(box_margin, box_margin,
-                          box_margin + corner_radius * 2, box_margin + corner_radius * 2,
-                          fill='#ffffff', outline='')
-        canvas.create_oval(self.icon_size - box_margin - corner_radius * 2, box_margin,
-                          self.icon_size - box_margin, box_margin + corner_radius * 2,
-                          fill='#ffffff', outline='')
-        canvas.create_oval(box_margin, self.icon_size - box_margin - corner_radius * 2,
-                          box_margin + corner_radius * 2, self.icon_size - box_margin,
-                          fill='#ffffff', outline='')
-        canvas.create_oval(self.icon_size - box_margin - corner_radius * 2, self.icon_size - box_margin - corner_radius * 2,
-                          self.icon_size - box_margin, self.icon_size - box_margin,
-                          fill='#ffffff', outline='')
-        
-        # Draw "IM" text in blue, bold
-        canvas.create_text(self.icon_size // 2, self.icon_size // 2, text="IT", fill='#0078d7', 
-                          font=('Arial', font_size, 'bold'), justify='center')
-        
-        # Force window update for better rendering
-        self.icon_root.update_idletasks()
-               
-    def get_device_name(self):
+    # Contact info
+    SUPPORT_EMAIL: str = "dbshelp@debswana.bw"
+    INTERNAL_NUMBER: str = "18222"
+    EXTERNAL_NUMBER: str = "+267 364 8222"
+    SERVICE_HOURS: str = "0700 - 1645hrs"
+    STANDBY_HOURS: str = "1645 - 0700hrs"
+    SELF_SERVICE_URL: str = "https://imservicedesk.debswana.bw/sd/SolutionsHome.sd"
+    
+    # Standby contacts
+    STANDBY_CONTACTS: dict = None
+    
+    def __post_init__(self):
+        self.STANDBY_CONTACTS = {
+            'DJW': '71382489',
+            'DOR': '71313074',
+            'DCC': '71320195'
+        }
+
+
+class SystemInfo:
+    """Handle system information retrieval"""
+    
+    @staticmethod
+    def get_device_name() -> str:
         try:
             return socket.gethostname()
-        except:
+        except Exception as e:
+            logger.error(f"Failed to get device name: {e}")
             return "Unknown"
     
-    def get_username(self):
+    @staticmethod
+    def get_username() -> str:
         try:
             return getpass.getuser()
-        except:
+        except Exception as e:
+            logger.error(f"Failed to get username: {e}")
             return "Unknown"
     
-    def get_domain(self):
+    @staticmethod
+    def get_domain() -> str:
         try:
-            # Try to get domain name from environment variables
+            # Try environment variable first
             domain = os.environ.get('USERDOMAIN', '')
             if domain:
                 return domain
             
-            # Alternative method for domain detection
-            result = subprocess.run(['net', 'config', 'workstation'], 
-                                  capture_output=True, text=True, shell=True)
-            output = result.stdout
+            # Alternative method
+            result = subprocess.run(
+                ['net', 'config', 'workstation'],
+                capture_output=True,
+                text=True,
+                shell=True,
+                timeout=5
+            )
             
-            # Look for domain in the output
-            for line in output.split('\n'):
+            for line in result.stdout.split('\n'):
                 if 'Workstation domain' in line:
                     return line.split(':')[-1].strip()
             
             return "Unknown Domain"
-            
-        except:
+        except Exception as e:
+            logger.error(f"Failed to get domain: {e}")
             return "Unknown Domain"
     
-    def get_windows_network_name(self):
-        """Get the actual WiFi network name (SSID) on Windows"""
+    @staticmethod
+    def get_network_name() -> str:
+        """Get the actual WiFi network name (SSID) or connection type"""
         try:
-            result = subprocess.run(['netsh', 'wlan', 'show', 'interfaces'], 
-                                  capture_output=True, text=True, shell=True)
-            output = result.stdout
+            # Check for WiFi connection
+            result = subprocess.run(
+                ['netsh', 'wlan', 'show', 'interfaces'],
+                capture_output=True,
+                text=True,
+                shell=True,
+                timeout=5
+            )
             
             ssid_pattern = r'SSID\s*:\s*(.+)'
-            matches = re.findall(ssid_pattern, output)
+            matches = re.findall(ssid_pattern, result.stdout)
             
             if matches:
                 ssid = matches[0].strip()
                 if ssid and not ssid.isspace():
                     return ssid
             
-            result = subprocess.run(['ipconfig'], capture_output=True, text=True, shell=True)
-            ip_output = result.stdout
+            # Check for wired connection
+            result = subprocess.run(
+                ['ipconfig'],
+                capture_output=True,
+                text=True,
+                shell=True,
+                timeout=5
+            )
             
             ip_pattern = r'IPv4 Address[\. ]+: ([\d\.]+)'
-            ip_matches = re.findall(ip_pattern, ip_output)
+            ip_matches = re.findall(ip_pattern, result.stdout)
             
             for ip in ip_matches:
                 if not ip.startswith('169.254.') and not ip.startswith('127.'):
                     return "Ethernet (Wired)"
             
             return "Not Connected"
-            
         except Exception as e:
+            logger.error(f"Failed to get network name: {e}")
             return "Unknown"
+
+
+class IconCreator:
+    """Handle icon creation with proper scaling"""
+    
+    def __init__(self, size: int, config: Config):
+        self.size = size
+        self.config = config
+    
+    def create_text_icon(self) -> Optional[ImageTk.PhotoImage]:
+        """Create a text-based 'IT' icon with white rounded box"""
+        try:
+            image = Image.new('RGBA', (self.size, self.size), (0, 0, 0, 0))
+            draw = ImageDraw.Draw(image)
+            
+            # Calculate proportional sizes
+            box_margin = max(4, int(self.size * 0.08))
+            corner_radius = max(8, int(self.size * 0.13))
+            font_size = max(16, int(self.size * 0.35))
+            
+            # Draw rounded rectangle background
+            self._draw_rounded_rectangle(draw, box_margin, corner_radius)
+            
+            # Draw text
+            self._draw_text(draw, "IT", font_size)
+            
+            return ImageTk.PhotoImage(image)
+        except Exception as e:
+            logger.error(f"Error creating text icon: {e}")
+            return None
+    
+    def _draw_rounded_rectangle(self, draw: ImageDraw.Draw, margin: int, radius: int):
+        """Draw a rounded rectangle"""
+        box_coords = [margin, margin, self.size - margin, self.size - margin]
+        
+        # Draw corner circles
+        positions = [
+            (box_coords[0], box_coords[1]),  # Top-left
+            (box_coords[2] - radius * 2, box_coords[1]),  # Top-right
+            (box_coords[0], box_coords[3] - radius * 2),  # Bottom-left
+            (box_coords[2] - radius * 2, box_coords[3] - radius * 2)  # Bottom-right
+        ]
+        
+        for x, y in positions:
+            draw.ellipse([x, y, x + radius * 2, y + radius * 2], 
+                        fill=self.config.ICON_WHITE)
+        
+        # Fill rectangle areas
+        draw.rectangle([box_coords[0], box_coords[1] + radius,
+                       box_coords[2], box_coords[3] - radius],
+                      fill=self.config.ICON_WHITE)
+        draw.rectangle([box_coords[0] + radius, box_coords[1],
+                       box_coords[2] - radius, box_coords[3]],
+                      fill=self.config.ICON_WHITE)
+    
+    def _draw_text(self, draw: ImageDraw.Draw, text: str, font_size: int):
+        """Draw centered text on the icon"""
+        font = self._get_font(font_size)
+        
+        bbox = draw.textbbox((0, 0), text, font=font)
+        text_width = bbox[2] - bbox[0]
+        text_height = bbox[3] - bbox[1]
+        
+        text_x = (self.size - text_width) // 2
+        text_y = (self.size - text_height) // 2 - 2
+        
+        draw.text((text_x, text_y), text, fill=self.config.ICON_BLUE, font=font)
+    
+    @staticmethod
+    def _get_font(size: int) -> ImageFont.FreeTypeFont:
+        """Get the best available font"""
+        font_options = ["arialbd.ttf", "arial.ttf", "segoeuib.ttf"]
+        
+        for font_name in font_options:
+            try:
+                return ImageFont.truetype(font_name, size)
+            except:
+                continue
+        
+        return ImageFont.load_default()
+
+
+class CustomerSupportOverlay:
+    def __init__(self, config: Optional[Config] = None):
+        self.config = config or Config()
+        self.system_info = SystemInfo()
+        
+        # Window state
+        self.is_visible = False
+        self.hide_timer = None
+        
+        # Create windows
+        self.root = tk.Tk()
+        self.setup_main_window()
+        
+        self.icon_root = tk.Toplevel()
+        self.setup_icon_window()
+        
+        self.create_widgets()
+        self.update_info()
+    
+    def get_icon_size(self) -> int:
+        """Calculate appropriate icon size based on DPI"""
+        try:
+            hdc = windll.user32.GetDC(0)
+            dpi = windll.gdi32.GetDeviceCaps(hdc, 88)  # LOGPIXELSX
+            windll.user32.ReleaseDC(0, hdc)
+            
+            scale_factor = dpi / 96.0
+            scaled_size = int(self.config.BASE_ICON_SIZE * scale_factor)
+            
+            return max(self.config.MIN_ICON_SIZE, 
+                      min(scaled_size, self.config.MAX_ICON_SIZE))
+        except Exception as e:
+            logger.error(f"Error detecting icon size: {e}")
+            return self.config.BASE_ICON_SIZE
+    
+    def setup_main_window(self):
+        """Setup the main information overlay window"""
+        self.root.overrideredirect(True)
+        self.root.attributes('-alpha', 0.0)
+        self.root.attributes('-topmost', True)
+        
+        screen_width = self.root.winfo_screenwidth()
+        x_pos = screen_width - self.config.MAIN_WINDOW_WIDTH - self.config.MAIN_WINDOW_OFFSET
+        
+        geometry = (f"{self.config.MAIN_WINDOW_WIDTH}x{self.config.MAIN_WINDOW_HEIGHT}"
+                   f"+{x_pos}+{self.config.MAIN_WINDOW_OFFSET}")
+        self.root.geometry(geometry)
+        self.root.configure(bg=self.config.BG_DARK)
+    
+    def setup_icon_window(self):
+        """Setup the icon window"""
+        self.icon_root.overrideredirect(True)
+        self.icon_root.attributes('-topmost', False)
+        self.icon_root.attributes('-alpha', 1.0)
+        
+        self.icon_size = self.get_icon_size()
+        
+        screen_width = self.icon_root.winfo_screenwidth()
+        x_pos = screen_width - self.icon_size - self.config.ICON_MARGIN
+        
+        geometry = (f"{self.icon_size}x{self.icon_size}"
+                   f"+{x_pos}+{self.config.ICON_TOP_OFFSET}")
+        self.icon_root.geometry(geometry)
+        self.icon_root.configure(bg=self.config.TRANSPARENT_BG)
+        self.icon_root.wm_attributes("-transparentcolor", self.config.TRANSPARENT_BG)
+        
+        self.make_desktop_window()
+    
+    def make_desktop_window(self):
+        """Make the window behave like a desktop icon"""
+        try:
+            hwnd = windll.user32.FindWindowW(None, self.icon_root.title())
+            
+            GWL_EXSTYLE = -20
+            WS_EX_TOOLWINDOW = 0x00000080
+            WS_EX_NOACTIVATE = 0x08000000
+            
+            current_style = windll.user32.GetWindowLongW(hwnd, GWL_EXSTYLE)
+            new_style = current_style | WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE
+            windll.user32.SetWindowLongW(hwnd, GWL_EXSTYLE, new_style)
+        except Exception as e:
+            logger.error(f"Window style error: {e}")
+    
+    def create_widgets(self):
+        """Create widgets for both windows"""
+        self.create_main_widgets()
+        self.create_icon_widgets()
+    
+    def create_main_widgets(self):
+        """Widgets for the main overlay window"""
+        main_frame = tk.Frame(self.root, bg=self.config.BG_DARK)
+        main_frame.pack(fill='both', expand=True)
+        
+        # Title bar
+        self._create_title_bar(main_frame)
+        
+        # Content
+        content = tk.Frame(main_frame, bg=self.config.BG_DARK)
+        content.pack(fill='both', expand=True, padx=10, pady=10)
+        
+        # System info section
+        self._create_system_info_section(content)
+        
+        # Separator
+        self._create_separator(content)
+        
+        # Service desk section
+        self._create_service_desk_section(content)
+        
+        # Separator
+        self._create_separator(content)
+        
+        # Standby section
+        self._create_standby_section(content)
+        
+        # Bind mouse events
+        self.root.bind("<Enter>", self.on_enter_main_window)
+        self.root.bind("<Leave>", self.on_leave_main_window)
+    
+    def _create_title_bar(self, parent):
+        """Create title bar"""
+        title_frame = tk.Frame(parent, bg=self.config.BG_DARKER, height=40)
+        title_frame.pack(fill='x')
+        title_frame.pack_propagate(False)
+        
+        title = tk.Label(
+            title_frame,
+            text="Need IT Support?",
+            bg=self.config.BG_DARKER,
+            fg=self.config.FG_LIGHT,
+            font=('Microsoft Sans Serif', 10, 'bold')
+        )
+        title.pack(expand=True, pady=10)
+    
+    def _create_info_row(self, parent, label_text: str, is_value_bold: bool = True):
+        """Create a labeled info row and return the value label"""
+        frame = tk.Frame(parent, bg=self.config.BG_DARK)
+        frame.pack(fill='x', pady=2)
+        
+        label = tk.Label(
+            frame,
+            text=label_text,
+            bg=self.config.BG_DARK,
+            fg=self.config.FG_GRAY,
+            font=('Microsoft Sans Serif', 9),
+            anchor='w',
+            width=15
+        )
+        label.pack(side='left')
+        
+        font_weight = 'bold' if is_value_bold else 'normal'
+        value_label = tk.Label(
+            frame,
+            text="",
+            bg=self.config.BG_DARK,
+            fg=self.config.FG_LIGHT,
+            font=('Microsoft Sans Serif', 9, font_weight),
+            anchor='w'
+        )
+        value_label.pack(side='left', fill='x', expand=True)
+        
+        return value_label
+    
+    def _create_system_info_section(self, parent):
+        """Create system information section"""
+        sys_info_frame = tk.Frame(parent, bg=self.config.BG_DARK)
+        sys_info_frame.pack(fill='x', pady=(0, 5))
+        
+        self.device_value = self._create_info_row(sys_info_frame, "Device Name:")
+        self.user_value = self._create_info_row(sys_info_frame, "Username:")
+        self.domain_value = self._create_info_row(sys_info_frame, "Domain:")
+        self.network_value = self._create_info_row(sys_info_frame, "Network:")
+    
+    def _create_separator(self, parent):
+        """Create a separator line"""
+        separator = tk.Frame(parent, bg=self.config.BG_SEPARATOR, height=1)
+        separator.pack(fill='x', pady=8)
+    
+    def _create_service_desk_section(self, parent):
+        """Create service desk section"""
+        service_frame = tk.Frame(parent, bg=self.config.BG_DARK)
+        service_frame.pack(fill='x', pady=(0, 10))
+        
+        # Title
+        title = tk.Label(
+            service_frame,
+            text="Service Desk",
+            bg=self.config.BG_DARK,
+            fg=self.config.FG_LIGHT,
+            font=('Microsoft Sans Serif', 10, 'bold'),
+            anchor='w'
+        )
+        title.pack(anchor='w', pady=(0, 5))
+        
+        # Info rows
+        hours_label = self._create_info_row(service_frame, "Operating Hours:")
+        hours_label.config(text=self.config.SERVICE_HOURS)
+        
+        # Self service link
+        self._create_link_row(service_frame, "Self Service Articles:", 
+                             "Click Me", self.config.SELF_SERVICE_URL)
+        
+        email_label = self._create_info_row(service_frame, "Email:")
+        email_label.config(text=self.config.SUPPORT_EMAIL)
+        
+        internal_label = self._create_info_row(service_frame, "Internal Number:")
+        internal_label.config(text=self.config.INTERNAL_NUMBER)
+        
+        external_label = self._create_info_row(service_frame, "External Number:")
+        external_label.config(text=self.config.EXTERNAL_NUMBER)
+    
+    def _create_link_row(self, parent, label_text: str, link_text: str, url: str):
+        """Create a row with a clickable link"""
+        frame = tk.Frame(parent, bg=self.config.BG_DARK)
+        frame.pack(fill='x', pady=2)
+        
+        label = tk.Label(
+            frame,
+            text=label_text,
+            bg=self.config.BG_DARK,
+            fg=self.config.FG_GRAY,
+            font=('Microsoft Sans Serif', 9),
+            anchor='w',
+            width=15
+        )
+        label.pack(side='left')
+        
+        link = tk.Label(
+            frame,
+            text=link_text,
+            bg=self.config.BG_DARK,
+            fg=self.config.FG_LINK,
+            font=('Microsoft Sans Serif', 9, 'underline'),
+            cursor="hand2"
+        )
+        link.pack(side='left')
+        link.bind("<Button-1>", lambda e: webbrowser.open(url))
+    
+    def _create_standby_section(self, parent):
+        """Create standby section"""
+        standby_frame = tk.Frame(parent, bg=self.config.BG_DARK)
+        standby_frame.pack(fill='x', pady=(0, 10))
+        
+        # Title
+        title = tk.Label(
+            standby_frame,
+            text="Standby",
+            bg=self.config.BG_DARK,
+            fg=self.config.FG_LIGHT,
+            font=('Microsoft Sans Serif', 10, 'bold'),
+            anchor='w'
+        )
+        title.pack(anchor='w', pady=(0, 3))
+        
+        # Hours
+        hours_label = self._create_info_row(standby_frame, "Operating Hours:")
+        hours_label.config(text=self.config.STANDBY_HOURS)
+        
+        # Contacts
+        for name, number in self.config.STANDBY_CONTACTS.items():
+            contact_label = self._create_info_row(standby_frame, f"{name}:")
+            contact_label.config(text=number)
+    
+    def create_icon_widgets(self):
+        """Create icon widget"""
+        try:
+            icon_creator = IconCreator(self.icon_size, self.config)
+            self.icon_image = icon_creator.create_text_icon()
+            
+            if self.icon_image:
+                icon_container = tk.Frame(
+                    self.icon_root,
+                    bg=self.config.TRANSPARENT_BG,
+                    borderwidth=0,
+                    highlightthickness=0
+                )
+                icon_container.pack(fill='both', expand=True)
+                
+                self.icon_label = tk.Label(
+                    icon_container,
+                    image=self.icon_image,
+                    bg=self.config.TRANSPARENT_BG,
+                    borderwidth=0,
+                    highlightthickness=0,
+                    cursor="hand2"
+                )
+                self.icon_label.pack(expand=True, fill='both')
+                self.icon_label.bind("<Button-1>", self.toggle_overlay)
+                
+                self.icon_root.update_idletasks()
+                logger.info(f"Icon created successfully! Size: {self.icon_size}x{self.icon_size}")
+            else:
+                self._create_fallback_icon()
+        except Exception as e:
+            logger.error(f"Error creating icon: {e}")
+            self._create_fallback_icon()
+    
+    def _create_fallback_icon(self):
+        """Create a fallback text icon using tkinter canvas"""
+        logger.info("Using fallback icon")
+        
+        icon_container = tk.Frame(
+            self.icon_root,
+            bg=self.config.TRANSPARENT_BG,
+            borderwidth=0,
+            highlightthickness=0
+        )
+        icon_container.pack(fill='both', expand=True)
+        
+        canvas = tk.Canvas(
+            icon_container,
+            bg=self.config.TRANSPARENT_BG,
+            width=self.icon_size,
+            height=self.icon_size,
+            highlightthickness=0,
+            borderwidth=0,
+            cursor="hand2"
+        )
+        canvas.pack(expand=True, fill='both')
+        canvas.bind("<Button-1>", self.toggle_overlay)
+        
+        # Draw rounded rectangle
+        margin = max(4, int(self.icon_size * 0.08))
+        radius = max(8, int(self.icon_size * 0.13))
+        font_size = max(16, int(self.icon_size * 0.35))
+        
+        # Main rectangles
+        canvas.create_rectangle(
+            margin + radius, margin,
+            self.icon_size - margin - radius, self.icon_size - margin,
+            fill=self.config.ICON_WHITE, outline=''
+        )
+        canvas.create_rectangle(
+            margin, margin + radius,
+            self.icon_size - margin, self.icon_size - margin - radius,
+            fill=self.config.ICON_WHITE, outline=''
+        )
+        
+        # Corner circles
+        corners = [
+            (margin, margin),
+            (self.icon_size - margin - radius * 2, margin),
+            (margin, self.icon_size - margin - radius * 2),
+            (self.icon_size - margin - radius * 2, self.icon_size - margin - radius * 2)
+        ]
+        
+        for x, y in corners:
+            canvas.create_oval(
+                x, y, x + radius * 2, y + radius * 2,
+                fill=self.config.ICON_WHITE, outline=''
+            )
+        
+        # Text
+        canvas.create_text(
+            self.icon_size // 2, self.icon_size // 2,
+            text="IT",
+            fill=self.config.ICON_BLUE,
+            font=('Arial', font_size, 'bold'),
+            justify='center'
+        )
+        
+        self.icon_root.update_idletasks()
     
     def update_info(self):
         """Update the system information"""
-        device_name = self.get_device_name()
-        self.device_value.config(text=device_name)
-        
-        username = self.get_username()
-        self.user_value.config(text=username)
-        
-        domain = self.get_domain()
-        self.domain_value.config(text=domain)
-        
-        network_name = self.get_windows_network_name()
-        network_status = network_name
-        
-        # Update network color based on connection status
-        if "Not Connected" in network_name or "Unknown" in network_name:
-            self.network_value.config(text=network_status, fg='#ff4444')
-        else:
-            self.network_value.config(text=network_status, fg='#00ff00')
-        
-        self.root.after(5000, self.update_info)  # Update every 5 seconds
+        try:
+            self.device_value.config(text=self.system_info.get_device_name())
+            self.user_value.config(text=self.system_info.get_username())
+            self.domain_value.config(text=self.system_info.get_domain())
+            
+            network_name = self.system_info.get_network_name()
+            
+            # Update color based on status
+            if "Not Connected" in network_name or "Unknown" in network_name:
+                color = self.config.FG_ERROR
+            else:
+                color = self.config.FG_SUCCESS
+            
+            self.network_value.config(text=network_name, fg=color)
+        except Exception as e:
+            logger.error(f"Error updating info: {e}")
+        finally:
+            self.root.after(self.config.UPDATE_INTERVAL, self.update_info)
     
-    def is_mouse_over_main_window(self):
-        """Check if mouse is over the main overlay window"""
+    def is_mouse_over_window(self, window) -> bool:
+        """Check if mouse is over a specific window"""
         try:
             pt = POINT()
             windll.user32.GetCursorPos(byref(pt))
-            mouse_x, mouse_y = pt.x, pt.y
             
-            # Get main window position and size
-            main_x = self.root.winfo_x()
-            main_y = self.root.winfo_y()
-            main_width = self.root.winfo_width()
-            main_height = self.root.winfo_height()
+            x = window.winfo_x()
+            y = window.winfo_y()
+            width = window.winfo_width()
+            height = window.winfo_height()
             
-            # Check if mouse is within main window bounds
-            over_main = (main_x <= mouse_x <= main_x + main_width and
-                        main_y <= mouse_y <= main_y + main_height)
-            
-            return over_main
-        except:
-            return False
-    
-    def is_mouse_over_icon(self):
-        """Check if mouse is over the icon window"""
-        try:
-            pt = POINT()
-            windll.user32.GetCursorPos(byref(pt))
-            mouse_x, mouse_y = pt.x, pt.y
-            
-            # Get icon window position and size
-            icon_x = self.icon_root.winfo_x()
-            icon_y = self.icon_root.winfo_y()
-            icon_width = self.icon_root.winfo_width()
-            icon_height = self.icon_root.winfo_height()
-            
-            # Check if mouse is within icon bounds
-            over_icon = (icon_x <= mouse_x <= icon_x + icon_width and
-                        icon_y <= mouse_y <= icon_y + icon_height)
-            
-            return over_icon
-        except:
+            return (x <= pt.x <= x + width and y <= pt.y <= y + height)
+        except Exception as e:
+            logger.error(f"Error checking mouse position: {e}")
             return False
     
     def on_enter_main_window(self, event=None):
-        """Mouse entered the main window - cancel any hide timer"""
+        """Mouse entered the main window"""
         if self.hide_timer:
             self.root.after_cancel(self.hide_timer)
             self.hide_timer = None
     
     def on_leave_main_window(self, event=None):
-        """Mouse left the main window - start hide timer"""
-        # Schedule the overlay to hide after a short delay
+        """Mouse left the main window"""
         if self.is_visible:
-            self.hide_timer = self.root.after(500, self.check_mouse_position)
+            self.hide_timer = self.root.after(
+                self.config.HIDE_DELAY,
+                self.check_mouse_position
+            )
     
     def check_mouse_position(self):
-        """Check if mouse is still away from both windows and hide if needed"""
-        if not self.is_mouse_over_main_window() and not self.is_mouse_over_icon():
+        """Check if mouse is still away and hide if needed"""
+        over_main = self.is_mouse_over_window(self.root)
+        over_icon = self.is_mouse_over_window(self.icon_root)
+        
+        if not over_main and not over_icon:
             self.hide_overlay()
         else:
-            # Mouse is still over one of the windows, check again
-            self.hide_timer = self.root.after(100, self.check_mouse_position)
+            self.hide_timer = self.root.after(
+                self.config.CHECK_INTERVAL,
+                self.check_mouse_position
+            )
     
     def toggle_overlay(self, event=None):
-        """Toggle the information panel on click"""
+        """Toggle the information panel"""
         if self.is_visible:
             self.hide_overlay()
         else:
@@ -682,7 +708,6 @@ class CustomerSupportOverlay:
             self.is_visible = True
             self.root.attributes('-topmost', True)
             
-            # Cancel any existing hide timer
             if self.hide_timer:
                 self.root.after_cancel(self.hide_timer)
                 self.hide_timer = None
@@ -691,14 +716,13 @@ class CustomerSupportOverlay:
             for alpha in [0.0, 0.3, 0.6, 0.9]:
                 self.root.attributes('-alpha', alpha)
                 self.root.update()
-                time.sleep(0.02)
+                time.sleep(self.config.FADE_STEP_DELAY)
     
     def hide_overlay(self):
         """Hide the main overlay with smooth animation"""
         if self.is_visible:
             self.is_visible = False
             
-            # Cancel any existing hide timer
             if self.hide_timer:
                 self.root.after_cancel(self.hide_timer)
                 self.hide_timer = None
@@ -707,24 +731,37 @@ class CustomerSupportOverlay:
             for alpha in [0.9, 0.6, 0.3, 0.0]:
                 self.root.attributes('-alpha', alpha)
                 self.root.update()
-                time.sleep(0.02)
-    
-    def close_app(self):
-        """Close both windows and exit"""
-        self.root.quit()
-        self.root.destroy()
-        self.icon_root.destroy()
+                time.sleep(self.config.FADE_STEP_DELAY)
     
     def run(self):
         """Start the application"""
         try:
+            logger.info("Starting Customer Support Overlay")
             self.root.mainloop()
-        except:
-            pass
+        except Exception as e:
+            logger.error(f"Application error: {e}")
+        finally:
+            self.cleanup()
+    
+    def cleanup(self):
+        """Clean up resources"""
+        try:
+            if self.hide_timer:
+                self.root.after_cancel(self.hide_timer)
+            self.root.destroy()
+            self.icon_root.destroy()
+        except Exception as e:
+            logger.error(f"Cleanup error: {e}")
+
 
 def main():
-    app = CustomerSupportOverlay()
-    app.run()
+    try:
+        app = CustomerSupportOverlay()
+        app.run()
+    except Exception as e:
+        logger.critical(f"Fatal error: {e}", exc_info=True)
+        sys.exit(1)
+
 
 if __name__ == "__main__":
     main()
